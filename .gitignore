@@ -1,0 +1,12 @@
+# 보안: 절대 커밋하지 않을 파일
+.env
+projects.json
+CLAUDE.md
+logs/
+*.zip
+*.pyc
+__pycache__/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
