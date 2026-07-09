@@ -42,19 +42,44 @@ def register(mcp, get_client):
             return err(e)
 
     @mcp.tool()
-    def dooray_messenger_channels(page: int = 0, size: int = 100) -> str:
+    def dooray_messenger_channels(page: int = 0, size: int = 100, title: str = "") -> str:
         """참여 중인 메신저 채널 목록을 조회합니다. (GET /messenger/v1/channels)
 
         Args:
             page: 페이지 번호
-            size: 페이지 크기
+            size: 페이지 크기 (최대 100)
+            title: 채널 이름 필터 (부분 일치)
         """
         try:
             result = get_client().api(
                 "GET", "/messenger/v1/channels",
                 params={"page": page, "size": size}, full=True,
             )
-            return ok({"channels": result["result"], "totalCount": result["totalCount"]})
+            channels = result["result"] if isinstance(result["result"], list) else []
+            total = result["totalCount"] or len(channels)
+
+            if title.strip():
+                t = title.strip().lower()
+                channels = [c for c in channels if t in (c.get("title") or "").lower()]
+                total = len(channels)
+
+            # Dooray API가 page/size를 무시하고 전체를 반환하는 경우 클라이언트에서 페이지 적용
+            size = max(1, min(size, 100))
+            if len(channels) > size:
+                channels = channels[page * size:(page + 1) * size]
+
+            # 응답 크기 절감: 멤버 목록 등 부피가 큰 필드는 요약
+            slim = []
+            for c in channels:
+                members = c.get("users") or c.get("members") or []
+                slim.append({
+                    "id": c.get("id", ""),
+                    "title": c.get("title", ""),
+                    "type": c.get("type", ""),
+                    "memberCount": len(members) if isinstance(members, list) else None,
+                    "updatedAt": c.get("updatedAt", ""),
+                })
+            return ok({"channels": slim, "totalCount": total, "page": page, "size": size})
         except Exception as e:
             return err(e)
 
