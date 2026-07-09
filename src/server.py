@@ -3,6 +3,7 @@
 Phase 1: 핵심 CRUD (list_tasks, get_task, create_task, update_task, add_comment, list_tags, list_members)
 Phase 2: 업무 자동화 (move_task, upload_file, list_workflows, list_milestones, get_comments, delete_task, send_webhook)
 Phase 3: Resource 프로바이더 (projects, tags, tenant-config)
+Phase 7: Dooray 서비스 API 전체 — Common/Project 관리/Posts 확장/Calendar/Drive/Wiki/Messenger/Reservation/Contacts (src/services/)
 
 보안:
 - API 토큰은 .env에서만 로드 (하드코딩 금지)
@@ -1275,6 +1276,15 @@ def dooray_search_all_projects(
     except (ValidationError, Exception) as e:
         logger.error(f"search_all_projects 실패: {e}")
         return _error_response(e)
+
+
+# ═══════════════════════════════════════════════════════════
+# Phase 7: Dooray 서비스 API 전체 (Common/Project/Calendar/Drive/Wiki/Messenger/Reservation/Contacts)
+# ═══════════════════════════════════════════════════════════
+
+from .services import register_all as _register_service_tools
+
+_register_service_tools(mcp, get_client)
 
 
 # ═══════════════════════════════════════════════════════════

@@ -72,6 +72,7 @@ load_dotenv(_env_path)
 class DoorayClient:
     """Dooray REST API 클라이언트 (검증 내장)"""
 
+    API_ORIGIN = "https://api.dooray.com"
     BASE_URL = "https://api.dooray.com/project/v1"
     FILE_API_URL = "https://file-api.dooray.com"
     COMMON_API_URL = "https://api.dooray.com/common/v1"
@@ -177,6 +178,159 @@ class DoorayClient:
     def _resolve_project(self, project_id: str | None) -> str:
         """프로젝트 ID 해석: 별칭("파트너신청") → 숫자 ID 자동 변환."""
         return resolve_project_alias(project_id, self.default_project_id)
+
+    # ── 범용 API 레이어 (모든 Dooray 서비스: common/project/calendar/drive/wiki/messenger/reservation/contacts) ──
+
+    def api(
+        self,
+        method: str,
+        path: str,
+        params: dict | None = None,
+        payload: Any = None,
+        context: str = "",
+        full: bool = False,
+    ) -> Any:
+        """https://api.dooray.com 하위 모든 서비스 API 호출.
+
+        Args:
+            method: GET / POST / PUT / DELETE
+            path: "/calendar/v1/calendars" 형태의 절대 경로
+            params: 쿼리 파라미터
+            payload: JSON 바디 (dict 또는 list)
+            full: True면 {"result": ..., "totalCount": ...} 반환 (목록 API용)
+
+        Returns:
+            API 응답의 result (full=True면 totalCount 포함 dict)
+        """
+        method = method.upper()
+        if method not in ("GET", "POST", "PUT", "DELETE"):
+            raise ValidationError(f"지원하지 않는 HTTP 메서드: {method}")
+        if not path.startswith("/"):
+            path = "/" + path
+
+        ctx = context or f"{method} {path}"
+        url = f"{self.API_ORIGIN}{path}"
+        self._rate_limit()
+        try:
+            resp = requests.request(
+                method, url,
+                headers=self._headers,
+                params=params,
+                json=payload if payload is not None else None,
+                timeout=self.REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as e:
+            raise ValidationError(f"[{ctx}] 네트워크 오류: {e}")
+
+        if resp.status_code not in (200, 201, 204):
+            raise ValidationError(f"[{ctx}] HTTP {resp.status_code}: {resp.text[:300]}")
+
+        if not resp.content:
+            return {"result": None, "totalCount": None} if full else None
+
+        try:
+            data = resp.json()
+        except ValueError:
+            raise ValidationError(f"[{ctx}] 응답이 JSON이 아닙니다: {resp.text[:200]}")
+
+        result = validate_api_response(data, ctx)
+        if full:
+            return {"result": result, "totalCount": data.get("totalCount")}
+        return result
+
+    def api_upload(
+        self,
+        path: str,
+        file_path: str,
+        params: dict | None = None,
+        context: str = "",
+        max_size_mb: int = 100,
+    ) -> Any:
+        """multipart/form-data 파일 업로드 (Drive/Wiki/Draft 등).
+
+        Returns:
+            API 응답의 result (업로드된 파일 메타)
+        """
+        import os as _os
+
+        if not _os.path.isfile(file_path):
+            raise ValidationError(f"파일을 찾을 수 없습니다: {file_path}")
+        file_size = _os.path.getsize(file_path)
+        if file_size > max_size_mb * 1024 * 1024:
+            raise ValidationError(
+                f"파일 크기가 {max_size_mb}MB를 초과합니다: {file_size / 1024 / 1024:.1f}MB"
+            )
+
+        ctx = context or f"파일 업로드 {path}"
+        url = f"{self.API_ORIGIN}{path}"
+        self._rate_limit()
+        try:
+            with open(file_path, "rb") as f:
+                resp = requests.post(
+                    url,
+                    headers={"Authorization": f"dooray-api {self.api_token}"},
+                    params=params,
+                    files={"file": (_os.path.basename(file_path), f)},
+                    timeout=120,
+                )
+        except requests.RequestException as e:
+            raise ValidationError(f"[{ctx}] 네트워크 오류: {e}")
+
+        if resp.status_code not in (200, 201):
+            raise ValidationError(f"[{ctx}] HTTP {resp.status_code}: {resp.text[:300]}")
+        if not resp.content:
+            return None
+        try:
+            return validate_api_response(resp.json(), ctx)
+        except ValueError:
+            return None
+
+    def api_download(
+        self,
+        path: str,
+        file_name: str,
+        params: dict | None = None,
+        context: str = "",
+    ) -> str:
+        """?media=raw 형태의 파일 다운로드 (200 직접 응답 / 307 리다이렉트 모두 처리).
+
+        Returns:
+            다운로드된 로컬 파일 경로
+        """
+        import tempfile
+        import os as _os
+
+        ctx = context or f"파일 다운로드 {path}"
+        url = f"{self.API_ORIGIN}{path}"
+        auth_header = {"Authorization": f"dooray-api {self.api_token}"}
+        self._rate_limit()
+        try:
+            resp = requests.get(
+                url, headers=auth_header, params=params,
+                timeout=60, allow_redirects=False, stream=True,
+            )
+        except requests.RequestException as e:
+            raise ValidationError(f"[{ctx}] 네트워크 오류: {e}")
+
+        # 307 리다이렉트면 Location으로 재요청
+        if resp.status_code in (301, 302, 307, 308) and "Location" in resp.headers:
+            try:
+                resp = requests.get(
+                    resp.headers["Location"], headers=auth_header,
+                    timeout=60, stream=True,
+                )
+            except requests.RequestException as e:
+                raise ValidationError(f"[{ctx}] 리다이렉트 오류: {e}")
+
+        if resp.status_code != 200:
+            raise ValidationError(f"[{ctx}] HTTP {resp.status_code}: {resp.text[:300]}")
+
+        tmp_dir = tempfile.mkdtemp(prefix="dooray_")
+        local_path = _os.path.join(tmp_dir, file_name)
+        with open(local_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return local_path
 
     # ── Phase 1: 핵심 CRUD ────────────────────────────────
 
@@ -1056,7 +1210,7 @@ class DoorayClient:
     def list_templates(self, project_id: str | None = None) -> list[dict]:
         """프로젝트 템플릿 목록 조회."""
         pid = self._resolve_project(project_id)
-        url = f"{self.BASE_URL}/projects/{pid}/posts/templates"
+        url = f"{self.BASE_URL}/projects/{pid}/templates"
         try:
             result = self._get(url, context="템플릿 목록 조회")
         except ValidationError:
