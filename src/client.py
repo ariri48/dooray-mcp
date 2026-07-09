@@ -69,6 +69,39 @@ _env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
 load_dotenv(_env_path)
 
 
+def _prompt_api_token_dialog() -> str:
+    """API 토큰 입력 창 표시 (공용 PC용 — 파일 저장 없이 메모리에만 보관).
+
+    .env에 DOORAY_API_TOKEN이 비어있을 때 첫 사용 시 호출됩니다.
+    macOS 전용 (osascript). 취소하거나 GUI가 없으면 빈 문자열 반환.
+    """
+    import subprocess
+    import sys as _sys
+
+    if _sys.platform != "darwin":
+        return ""
+
+    script = (
+        'set dlg to display dialog '
+        '"Dooray API 토큰을 입력하세요 (형식: org_id:token)\n\n'
+        '공용 PC 보호를 위해 토큰은 저장되지 않으며,\n'
+        'Claude Code를 종료하면 사라집니다." '
+        'default answer "" with hidden answer '
+        'with title "Dooray MCP 인증" with icon caution\n'
+        'text returned of dlg'
+    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=180,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    if result.returncode != 0:  # 사용자가 취소
+        return ""
+    return result.stdout.strip()
+
+
 class DoorayClient:
     """Dooray REST API 클라이언트 (검증 내장)"""
 
@@ -85,10 +118,16 @@ class DoorayClient:
         self.default_project_id = os.environ.get("DOORAY_DEFAULT_PROJECT_ID", "")
         self.webhook_url = os.environ.get("DOORAY_WEBHOOK_URL", "")
 
+        # 공용 PC 모드: .env에 토큰이 없으면 입력 창으로 요청 (메모리에만 보관)
+        if not self.api_token:
+            self.api_token = _prompt_api_token_dialog()
+
         if not self.api_token:
             raise ValidationError(
                 "DOORAY_API_TOKEN이 설정되지 않았습니다. "
-                ".env 파일에 토큰을 설정하세요. (.env.example 참고)"
+                "개인 PC라면 .env 파일에 토큰을 설정하고, "
+                "공용 PC라면 다시 시도하여 입력 창에 토큰을 입력하세요. "
+                "(Dooray > 설정 > API 토큰에서 발급)"
             )
         if not self.tenant_id:
             raise ValidationError(
