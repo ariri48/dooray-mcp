@@ -3,6 +3,8 @@
 Dooray 태스크 관리를 위한 [Model Context Protocol](https://modelcontextprotocol.io/) 서버입니다.
 Claude Code에서 Dooray 태스크를 조회, 생성, 수정할 수 있습니다.
 
+> 📖 **사용 가이드 및 업데이트 방법**: [GUIDE.md](GUIDE.md) — 기존 사용자는 `git pull` + Claude Code 재시작만 하면 됩니다.
+
 ## 설치 (3단계)
 
 ### 1. 레포 복제
