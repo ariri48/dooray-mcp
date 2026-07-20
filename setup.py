@@ -48,7 +48,7 @@ def step_1_token():
 
     print("  Dooray API 토큰을 입력하세요.")
     print("  (Dooray > 설정 > API 토큰에서 발급)")
-    print("  형식: org_id:token (예: ajjt1imxmtj4:tyFuu5obTEGSO3sh5cxgow)")
+    print("  형식: org_id:token (예: ajjt1imxmtj4:EXAMPLEtoken1234567890)")
     print()
 
     token = input("  API 토큰: ").strip()
