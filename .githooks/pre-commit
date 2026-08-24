@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""pre-commit — 스테이징된 변경에서 시크릿을 탐지해 커밋을 차단한다.
+
+2026-08-24 도입. 계기: partner.yaml 에 Dooray API 토큰, bulk-mailer/accounts.json 에
+메일 비밀번호가 평문 커밋되어 있었고, 교육 슬라이드의 실제 토큰이 public GitHub Pages 로
+노출되어 있었음.
+
+우회: git commit --no-verify   /   해당 줄에 "allowlist secret" 주석 추가
+"""
+
+import os
+import re
+import subprocess
+import sys
+
+# ── 커밋 자체를 막는 파일명 (런타임 전용 비밀 파일) ──────────────────
+BLOCKED_NAMES = {
+    "accounts.json", "smtp_accounts.json", "dooray_token.json",
+    "dooray_config.json", "credentials.json", "service_account.json",
+}
+BLOCKED_SUFFIXES = (".db", ".pem", ".key", ".p12", ".keystore")
+BLOCKED_PATH_PARTS = (".nca_browser_profile", ".browser_data", "browser_profile")
+
+# ── 스테이징된 '추가된 줄'에서 찾는 시크릿 패턴 ──────────────────────
+PATTERNS = [
+    ("Dooray API 토큰",
+     re.compile(r"\b[a-z0-9]{10,14}:[A-Za-z0-9_]{20,26}\b")),
+    ("Dooray 웹훅 URL",
+     re.compile(r"(?:hook|[a-z]+)\.dooray\.com/services/\d+/\d+/[A-Za-z0-9_-]+")),
+    ("비밀값 하드코딩",
+     re.compile(r"(?i)\b(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|"
+                r"auth[_-]?token|bearer[_-]?token)\b\s*[:=]\s*"
+                r"[\"'][^\"'\s]{8,}[\"']")),
+    ("개인키",
+     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----")),
+    ("AWS 액세스 키",
+     re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+]
+
+# ── 자리표시자/예시로 판단해 통과시키는 신호 ────────────────────────
+PLACEHOLDER = re.compile(
+    r"(?i)example|placeholder|dummy|sample|changeme|your[_-]?|xxxx|"
+    r"\$\{|\{\{|<[a-z_]+>|여기에|발급받은|채워|redacted|masking|마스킹|\*{4}"
+)
+ALLOWLIST_MARK = re.compile(r"(?i)allowlist secret|pragma:\s*allowlist")
+
+
+def staged_files():
+    out = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACM", "-z"],
+        capture_output=True, text=True).stdout
+    return [f for f in out.split("\0") if f]
+
+
+def check_filenames(files):
+    hits = []
+    for f in files:
+        base = os.path.basename(f)
+        if base in BLOCKED_NAMES:
+            hits.append((f, f"비밀 파일 '{base}' 은 커밋 대상이 아닙니다"))
+        elif base == ".env" or (base.startswith(".env.") and not base.endswith(
+                (".example", ".sample", ".template"))):
+            hits.append((f, ".env 은 커밋 대상이 아닙니다 (.env.example 만 허용)"))
+        elif f.endswith(BLOCKED_SUFFIXES):
+            hits.append((f, f"'{base}' 확장자는 커밋 대상이 아닙니다"))
+        elif any(p in f for p in BLOCKED_PATH_PARTS):
+            hits.append((f, "브라우저 프로필(쿠키·세션)은 커밋 대상이 아닙니다"))
+    return hits
+
+
+def check_content():
+    """스테이징 diff 의 추가된 줄만 검사."""
+    diff = subprocess.run(
+        ["git", "diff", "--cached", "--unified=0", "--no-color",
+         "--diff-filter=ACM"],
+        capture_output=True, text=True, errors="replace").stdout
+    hits, path, lineno = [], None, 0
+    for line in diff.splitlines():
+        if line.startswith("+++ b/"):
+            path = line[6:]
+            continue
+        if line.startswith("@@"):
+            m = re.search(r"\+(\d+)", line)
+            lineno = int(m.group(1)) if m else 0
+            continue
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        text = line[1:]
+        lineno += 1
+        if ALLOWLIST_MARK.search(text):
+            continue
+        for label, rx in PATTERNS:
+            m = rx.search(text)
+            if not m:
+                continue
+            if PLACEHOLDER.search(m.group(0)):
+                continue
+            frag = m.group(0)
+            masked = frag[:6] + "…" if len(frag) > 10 else frag
+            hits.append((path, lineno, label, masked))
+    return hits
+
+
+def main():
+    files = staged_files()
+    if not files:
+        return 0
+
+    name_hits = check_filenames(files)
+    content_hits = check_content()
+    if not name_hits and not content_hits:
+        return 0
+
+    print("\n\033[31m✗ 커밋 차단 — 시크릿으로 보이는 내용이 있습니다\033[0m\n",
+          file=sys.stderr)
+    for f, reason in name_hits:
+        print(f"  [파일] {f}\n         {reason}", file=sys.stderr)
+    for path, lineno, label, masked in content_hits:
+        print(f"  [내용] {path}:{lineno}\n         {label} → {masked}",
+              file=sys.stderr)
+
+    print("""
+  조치:
+    · 비밀값은 .env 나 gitignore 된 설정 파일로 옮기고, 코드에서는 ${VAR} 로 참조
+      (참고 구현: partner.yaml + dooray_dashboard/config.py 의 ${VAR} 치환)
+    · 파일 자체가 비밀이면  git rm --cached <파일>  후 .gitignore 에 추가
+    · 예시/자리표시자라 오탐이면  그 줄에 "allowlist secret" 주석 추가
+    · 정말 의도한 커밋이면  git commit --no-verify
+""", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
