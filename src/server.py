@@ -479,6 +479,9 @@ def dooray_delete_task(
     [경고] 이 작업은 되돌릴 수 없습니다!
     삭제 전 confirm=true를 명시적으로 전달해야 합니다.
 
+    Open API가 삭제를 거부(HTTP 404)하면 제목 앞에 [중복]을 붙이고 완료 처리합니다.
+    이때 결과는 deleted=false이며, 완전 삭제는 web_link에서 웹으로 진행해야 합니다.
+
     Args:
         post_id: 삭제할 태스크 ID (필수)
         project_id: 프로젝트 ID (미지정 시 기본 프로젝트)
@@ -507,7 +510,12 @@ def dooray_delete_task(
             })
 
         result = client.delete_task(post_id, project_id or None)
-        log_action("delete_task", post_id, {"subject": result.get("삭제된_태스크", "")}, project_id)
+        log_action(
+            "delete_task" if result.get("deleted", True) else "mark_task_removed",
+            post_id,
+            {"subject": result.get("삭제된_태스크") or result.get("정리된_태스크", "")},
+            project_id,
+        )
         return _success_response(result)
     except (ValidationError, Exception) as e:
         logger.error(f"delete_task 실패: {e}")

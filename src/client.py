@@ -1033,6 +1033,11 @@ class DoorayClient:
 
         [주의] 이 작업은 되돌릴 수 없습니다!
         삭제 전 태스크 정보를 확인하고 반환합니다.
+
+        Open API 는 업무 DELETE 를 지원하지 않아 HTTP 404 를 돌려준다.
+        (웹 경로 /v2/wapi 는 로그인 쿠키 전용이라 API 토큰으로 호출 불가 — 2026-09-28 확인)
+        404 가 나면 '정리 처리'로 대신한다: 제목 앞에 [중복] + 완료 상태.
+        실제 삭제는 반환되는 web_link 에서 웹으로 진행한다.
         """
         pid = self._resolve_project(project_id)
         post_id = validate_post_id(post_id)
@@ -1042,13 +1047,77 @@ class DoorayClient:
         subject = task_info.get("subject", "(제목 없음)")
 
         url = f"{self.BASE_URL}/projects/{pid}/posts/{post_id}"
-        self._delete(url, f"태스크 삭제 ({post_id})")
+        try:
+            self._delete(url, f"태스크 삭제 ({post_id})")
+        except ValidationError as e:
+            if "HTTP 404" not in str(e):
+                raise
+            return self._mark_task_removed(pid, post_id, task_info)
 
         return {
             "id": post_id,
             "삭제된_태스크": subject,
             "message": f"태스크 삭제 완료: '{subject}' ({post_id})",
             "warning": "이 작업은 되돌릴 수 없습니다.",
+        }
+
+    DUPLICATE_PREFIX = "[중복] "
+
+    def _mark_task_removed(self, pid: str, post_id: str, task: dict) -> dict:
+        """삭제 대신 제목에 [중복] 을 붙이고 완료 처리 (Open API 삭제 불가 대응).
+
+        PUT 은 전체 교체라 빠진 필드가 비워질 수 있으므로
+        기존 본문·담당자·참조자·태그·마일스톤·기한·우선순위를 그대로 실어 보낸다.
+        """
+        subject = task.get("subject", "")
+        new_subject = subject if subject.startswith(self.DUPLICATE_PREFIX) else self.DUPLICATE_PREFIX + subject
+
+        def _members(key: str) -> list[dict]:
+            out = []
+            for u in (task.get("users") or {}).get(key) or []:
+                if u.get("type") == "member" and (u.get("member") or {}).get("organizationMemberId"):
+                    out.append({"type": "member",
+                                "member": {"organizationMemberId": u["member"]["organizationMemberId"]}})
+                elif u.get("type") == "emailUser" and u.get("emailUser"):
+                    out.append({"type": "emailUser", "emailUser": u["emailUser"]})
+            return out
+
+        body = task.get("body") or {}
+        payload: dict[str, Any] = {
+            "subject": new_subject,
+            "body": {"mimeType": body.get("mimeType", "text/x-markdown"),
+                     "content": body.get("content", "")},
+            "users": {"to": _members("to"), "cc": _members("cc")},
+            "tagIds": [t["id"] for t in task.get("tags") or [] if t.get("id")],
+        }
+        if task.get("milestone") and task["milestone"].get("id"):
+            payload["milestoneId"] = task["milestone"]["id"]
+        if task.get("dueDate"):
+            payload["dueDate"] = task["dueDate"]
+            payload["dueDateFlag"] = task.get("dueDateFlag", True)
+        if task.get("priority"):
+            payload["priority"] = task["priority"]
+
+        changes = []
+        if new_subject != subject:
+            self._put(f"{self.BASE_URL}/projects/{pid}/posts/{post_id}", payload,
+                      f"태스크 제목 [중복] 처리 ({post_id})")
+            changes.append(f"제목 → {new_subject}")
+        if task.get("workflowClass") != "closed":
+            self.api("POST", f"/project/v1/projects/{pid}/posts/{post_id}/set-done",
+                     payload={}, context=f"태스크 완료 처리 ({post_id})")
+            changes.append("상태 → 완료")
+
+        web_base = os.environ.get("DOORAY_WEB_URL", "").rstrip("/")
+        return {
+            "id": post_id,
+            "deleted": False,
+            "정리된_태스크": subject,
+            "변경사항": changes,
+            "link": self.task_link(post_id),
+            "web_link": f"{web_base}/task/{pid}/{post_id}" if web_base else "",
+            "message": ("Open API 는 태스크 삭제를 지원하지 않아 [중복] 표시 + 완료 처리로 대신했습니다. "
+                        "완전 삭제는 web_link 에서 웹으로 진행하세요."),
         }
 
     def send_webhook(self, message: str, bot_name: str = "Dooray MCP") -> dict:
