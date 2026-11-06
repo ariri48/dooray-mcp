@@ -5,6 +5,7 @@ Claude Code MCP 등록 시 이 파일을 사용합니다:
 
 자동 업데이트:
   서버 시작 시 git pull --ff-only를 시도하여 항상 최신 코드로 실행됩니다.
+  - 새 버전을 받았거나 업데이트에 실패하면 첫 도구 응답 끝에 안내 한 줄이 붙습니다.
   - 네트워크 불가/로컬 수정 충돌 시에도 서버는 기존 코드로 정상 시작합니다.
   - 끄려면 .env 또는 환경변수에 DOORAY_MCP_AUTO_UPDATE=false 설정.
 """
@@ -46,11 +47,34 @@ def _auto_update() -> None:
     if not os.path.isdir(os.path.join(project_root, ".git")):
         return
 
+    def _head() -> str:
+        try:
+            r = subprocess.run(
+                ["git", "-C", project_root, "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return r.stdout.strip() if r.returncode == 0 else ""
+        except (subprocess.TimeoutExpired, OSError):
+            return ""
+
     try:
+        before = _head()
         result = subprocess.run(
             ["git", "-C", project_root, "pull", "--ff-only", "--quiet"],
             capture_output=True, text=True, timeout=15,
         )
+        # 업데이트·실패 결과를 첫 도구 응답에 한 번 붙여 사용자에게 알림
+        try:
+            from src.update_notice import ENV_KEY, build_notice
+
+            notice = build_notice(
+                before, _head(), result.returncode, result.stderr,
+                os.path.join(project_root, "GUIDE.md"),
+            )
+            if notice:
+                os.environ[ENV_KEY] = notice
+        except Exception as e:  # 안내 실패가 서버 시작을 막지 않게
+            print(f"[dooray-mcp] 업데이트 안내 준비 실패: {e}", file=sys.stderr)
         if result.returncode == 0:
             print("[dooray-mcp] 자동 업데이트 확인 완료 (최신 상태)", file=sys.stderr)
         else:

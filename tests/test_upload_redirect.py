@@ -112,3 +112,37 @@ def test_wiki_replace_text_refuses_ambiguous():
         })
     assert "저장하지 않았습니다" in text
     assert api.call_count == 1
+
+
+# ── 자동 업데이트 안내 ─────────────────────────────────
+
+def test_notice_on_update(tmp_path):
+    from src.update_notice import build_notice
+
+    g = tmp_path / "GUIDE.md"
+    g.write_text("| 버전 | 내용 |\n|---|---|\n| **v9.9.9** | 무언가 고침 |\n| v9.9.8 | 예전 |\n", encoding="utf-8")
+    n = build_notice("aaa", "bbb", 0, "", str(g))
+    assert "v9.9.9" in n and "무언가 고침" in n
+    assert build_notice("aaa", "aaa", 0, "", str(g)) == ""
+
+
+def test_notice_on_failure_but_not_offline(tmp_path):
+    from src.update_notice import build_notice
+
+    g = str(tmp_path / "none.md")
+    assert "git pull" in build_notice("a", "a", 1, "fatal: Not possible to fast-forward", g)
+    assert build_notice("a", "a", 1, "fatal: unable to access 'https://github.com/'", g) == ""
+
+
+def test_notice_attached_once(monkeypatch):
+    from src import server as srv
+    import asyncio
+
+    monkeypatch.setenv("DOORAY_MCP_UPDATE_NOTICE", "[dooray-mcp 안내] 테스트")
+    with mock.patch("src.client.DoorayClient.api", return_value={"id": "1"}):
+        first = asyncio.run(srv.mcp.call_tool("dooray_common_me", {}))
+        second = asyncio.run(srv.mcp.call_tool("dooray_common_me", {}))
+    first = first[0] if isinstance(first, tuple) else first
+    second = second[0] if isinstance(second, tuple) else second
+    assert "테스트" in first[-1].text
+    assert all("테스트" not in b.text for b in second)

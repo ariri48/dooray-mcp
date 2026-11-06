@@ -46,7 +46,16 @@ logging.basicConfig(
 logger = logging.getLogger("dooray-mcp")
 
 # MCP 서버 초기화
-mcp = FastMCP("Dooray MCP")
+class _DoorayFastMCP(FastMCP):
+    """자동 업데이트 안내를 첫 도구 응답에 한 번 붙이는 FastMCP."""
+
+    async def call_tool(self, name, arguments):
+        from .update_notice import attach_notice
+
+        return attach_notice(await super().call_tool(name, arguments))
+
+
+mcp = _DoorayFastMCP("Dooray MCP")
 
 # 클라이언트 lazy 초기화
 _client: DoorayClient | None = None
