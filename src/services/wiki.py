@@ -191,6 +191,55 @@ def register(mcp, get_client):
             return err(e)
 
     @mcp.tool()
+    def dooray_wiki_page_replace_text(wiki_id: str, page_id: str, replacements_json: str) -> str:
+        """위키 본문에서 지정한 문자열만 바꿔 저장합니다. 본문 전체를 다시 보내지 않아도 됩니다.
+
+        각 찾을 문자열이 본문에 정확히 1번 있을 때만 저장합니다(0번·여러 번이면 아무것도 바꾸지 않음).
+
+        Args:
+            wiki_id: 위키 ID (필수)
+            page_id: 페이지 ID (필수)
+            replacements_json: [{"find": "옛 문자열", "replace": "새 문자열"}, ...] 형식 JSON (필수)
+        """
+        try:
+            import json as _json
+
+            try:
+                items = _json.loads(replacements_json)
+            except ValueError as e:
+                raise ValidationError(f"replacements_json 형식 오류: {e}")
+            if isinstance(items, dict):
+                items = [items]
+            if not isinstance(items, list) or not items:
+                raise ValidationError("replacements_json이 비어있습니다.")
+
+            client = get_client()
+            page = client.api("GET", f"/wiki/v1/wikis/{wiki_id}/pages/{page_id}")
+            body = (page or {}).get("body") or {}
+            content = body.get("content") or ""
+
+            problems = []
+            for i, it in enumerate(items):
+                if not isinstance(it, dict) or not isinstance(it.get("find"), str) or not it["find"]:
+                    problems.append(f"{i + 1}번: find가 비어있음")
+                    continue
+                n = content.count(it["find"])
+                if n != 1:
+                    problems.append(f"{i + 1}번: 찾을 문자열이 {n}번 있음")
+            if problems:
+                raise ValidationError("저장하지 않았습니다. " + "; ".join(problems))
+
+            for it in items:
+                content = content.replace(it["find"], str(it.get("replace", "")), 1)
+            client.api(
+                "PUT", f"/wiki/v1/wikis/{wiki_id}/pages/{page_id}/content",
+                payload={"body": markdown_body(content)},
+            )
+            return ok({"message": f"본문 치환 완료: {len(items)}건", "page_id": page_id})
+        except Exception as e:
+            return err(e)
+
+    @mcp.tool()
     def dooray_wiki_page_update_referrers(wiki_id: str, page_id: str, referrer_ids: str) -> str:
         """위키 페이지 참조자를 변경합니다. (PUT .../pages/{page-id}/referrers)
 

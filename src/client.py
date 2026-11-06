@@ -277,6 +277,54 @@ class DoorayClient:
             return {"result": result, "totalCount": data.get("totalCount")}
         return result
 
+    @staticmethod
+    def _is_dooray_host(url: str) -> bool:
+        """토큰을 실어 보내도 되는 두레이 도메인인지 확인 (https + *.dooray.com)."""
+        from urllib.parse import urlparse
+
+        u = urlparse(url)
+        host = (u.hostname or "").lower()
+        return u.scheme == "https" and (host == "dooray.com" or host.endswith(".dooray.com"))
+
+    def send_file_with_redirect(
+        self,
+        method: str,
+        url: str,
+        file_path: str,
+        params: dict | None = None,
+        timeout: int = 120,
+    ) -> requests.Response:
+        """파일 업로드 요청 (Dooray 307 리다이렉트 처리 포함).
+
+        Dooray 업로드 API는 307로 file-api.dooray.com 주소를 돌려준다.
+        requests가 자동으로 따라가면 호스트가 바뀌면서 Authorization 헤더를 지워 401이 난다.
+        그래서 자동 리다이렉트를 끄고 location으로 Authorization과 파일을 다시 담아 보낸다.
+        (서비스 API 가이드 '파일 업/다운로드' 동작 과정 3번, FAQ 1번)
+        """
+        import os as _os
+
+        headers = {"Authorization": f"dooray-api {self.api_token}"}
+        name = _os.path.basename(file_path)
+        with open(file_path, "rb") as f:
+            resp = requests.request(
+                method, url, headers=headers, params=params,
+                files={"file": (name, f)}, timeout=timeout, allow_redirects=False,
+            )
+        for _ in range(3):
+            if resp.status_code not in (301, 302, 303, 307, 308):
+                break
+            location = resp.headers.get("location")
+            if not location:
+                break
+            if not self._is_dooray_host(location):
+                raise ValidationError(f"두레이 밖 주소로 리다이렉트되어 중단합니다: {location[:100]}")
+            with open(file_path, "rb") as f:
+                resp = requests.request(
+                    method, location, headers=headers,
+                    files={"file": (name, f)}, timeout=timeout, allow_redirects=False,
+                )
+        return resp
+
     def api_upload(
         self,
         path: str,
@@ -304,14 +352,7 @@ class DoorayClient:
         url = f"{self.API_ORIGIN}{path}"
         self._rate_limit()
         try:
-            with open(file_path, "rb") as f:
-                resp = requests.post(
-                    url,
-                    headers={"Authorization": f"dooray-api {self.api_token}"},
-                    params=params,
-                    files={"file": (_os.path.basename(file_path), f)},
-                    timeout=120,
-                )
+            resp = self.send_file_with_redirect("POST", url, file_path, params=params)
         except requests.RequestException as e:
             raise ValidationError(f"[{ctx}] 네트워크 오류: {e}")
 

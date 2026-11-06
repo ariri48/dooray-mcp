@@ -203,14 +203,12 @@ def register(mcp, get_client):
                 raise ValidationError(f"파일을 찾을 수 없습니다: {file_path}")
             url = f"{client.API_ORIGIN}/drive/v1/drives/{drive_id}/files/{file_id}"
             client._rate_limit()
-            with open(file_path, "rb") as f:
-                resp = _requests.put(
-                    url,
-                    headers={"Authorization": f"dooray-api {client.api_token}"},
-                    params={"media": "raw"},
-                    files={"file": (_os.path.basename(file_path), f)},
-                    timeout=120,
+            try:
+                resp = client.send_file_with_redirect(
+                    "PUT", url, file_path, params={"media": "raw"}
                 )
+            except _requests.RequestException as e:
+                raise ValidationError(f"[파일 교체] 네트워크 오류: {e}")
             if resp.status_code not in (200, 201):
                 raise ValidationError(f"[파일 교체] HTTP {resp.status_code}: {resp.text[:300]}")
             return ok({"message": f"파일 내용 교체 완료: {file_id}"})
